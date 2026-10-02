@@ -59,6 +59,9 @@ def add_cards(job,input_path):
     if (job/'cards.json').exists():
         raise ValueError('Refusing to overwrite existing cards; review in a new revision/job')
     segments=read_json(job/'segments.json');frames=read_json(job/'frames.json')
+    for name in ['segments','frames']:
+        if sha(job/(name+'.json'))!=manifest.get(name+'_sha256'):
+            raise ValueError('Processed '+name+' metadata changed or lacks a verification hash; process a new job')
     segment_map={s['id']:s for s in segments};frame_map={f['id']:f for f in frames}
     incoming=read_json(input_path)
     cards=incoming['cards'] if isinstance(incoming,dict) else incoming
@@ -66,9 +69,10 @@ def add_cards(job,input_path):
         raise ValueError('Cards must be a nonempty array')
     ids=set();output=[]
     for card in cards:
+        if not isinstance(card,dict):raise ValueError('Each card must be an object')
         for key in ['id','title','kind','when_to_use','steps','rationale','limits','evidence']:
             if key not in card or not card[key]:raise ValueError('Missing card field: '+key)
-        if not re.fullmatch(r'[a-zA-Z0-9_-]{1,80}',card['id']) or card['id'] in ids:
+        if not isinstance(card['id'],str) or not re.fullmatch(r'[a-zA-Z0-9_-]{1,80}',card['id']) or card['id'] in ids:
             raise ValueError('Invalid or duplicate card ID')
         ids.add(card['id'])
         if card['kind'] not in {'method','workflow','interaction_pattern','claim','resource'}:
@@ -79,7 +83,13 @@ def add_cards(job,input_path):
             raise ValueError('Steps and limits must be arrays')
         if not all(isinstance(s,str) and s.strip() for s in card['steps']+card['limits']):
             raise ValueError('Steps and limits need nonempty text')
-        evidence=card['evidence'];selected_s=evidence.get('segment_ids',[]);selected_f=evidence.get('frame_ids',[])
+        evidence=card['evidence']
+        if not isinstance(evidence,dict):raise ValueError('Evidence must be an object')
+        selected_s=evidence.get('segment_ids',[]);selected_f=evidence.get('frame_ids',[])
+        if not isinstance(selected_s,list) or not isinstance(selected_f,list):
+            raise ValueError('Evidence IDs must be arrays')
+        if any(type(s) is not int for s in selected_s) or any(not isinstance(f,str) for f in selected_f):
+            raise ValueError('Invalid evidence ID type')
         if not selected_s and not selected_f:raise ValueError('Card needs source evidence')
         if any(s not in segment_map for s in selected_s) or any(f not in frame_map for f in selected_f):
             raise ValueError('Card references nonexistent transcript segment or frame')
@@ -87,6 +97,7 @@ def add_cards(job,input_path):
         if sha(inside(job,manifest['media_path']))!=manifest['media']['sha256']:
             raise ValueError('Media changed; review before card creation')
         if selected_s:
+            artifacts.append(dict(path='segments.json',sha256=manifest['segments_sha256']))
             artifacts.append(dict(path='transcript.srt',sha256=manifest['transcript_sha256']))
             if sha(job/'transcript.srt')!=manifest['transcript_sha256']:
                 raise ValueError('Transcript changed; review material before card creation')
@@ -140,6 +151,8 @@ def query(library,question,scope='personal',limit=5,all_scopes=False):
 def get(library,card_id):
     for job,card in discover(library):
         if card['id']==card_id:
+            if card['status'] in {'candidate','archived','superseded'}:
+                return dict(id=card_id,status=card['status'],action='Inactive card content withheld')
             if changed(job,card):
                 return dict(id=card_id,status='needs_review',source_changed=True,
                             action='Review changed evidence; stale card content withheld')
@@ -151,7 +164,12 @@ def export(job,destination):
     job=Path(job).resolve();manifest=read_json(job/'manifest.json');cards=read_json(job/'cards.json')['cards']
     if any(changed(job,c) for c in cards):raise ValueError('Evidence changed; cannot export stale cards')
     target=Path(destination).expanduser().resolve();target.mkdir(parents=True,exist_ok=True)
-    folder=target/manifest['id']
+    if not isinstance(manifest['id'],str) or not re.fullmatch(r'[a-zA-Z0-9_-]+',manifest['id']):
+        raise ValueError('Invalid export job ID')
+    folder=inside(target,manifest['id'])
+    for card in cards:
+        for f in card['evidence']['frames']:
+            inside(folder,f['path'])
     if folder.exists():raise ValueError('Export exists; refusing overwrite')
     folder.mkdir()
     lines=['---','id: '+manifest['id'],'kind: source','scope: '+manifest['scope'],

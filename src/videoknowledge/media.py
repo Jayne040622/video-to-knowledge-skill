@@ -85,11 +85,15 @@ def frames(job,times=None,budget=24):
     if sha(media)!=manifest['media']['sha256']:
         raise ValueError('Media changed since download verification')
     duration=manifest['media']['duration']
+    if manifest.get('segments_sha256') and sha(job/'segments.json')!=manifest['segments_sha256']:
+        raise ValueError('Segment metadata changed; review before extracting more frames')
     segments=read_json(job/'segments.json') if (job/'segments.json').exists() else []
     proposed=anchor_times(segments,duration,budget) if times is None else [
         dict(seconds=float(t),reason='agent_requested',segment_ids=[]) for t in times]
     directory=job/'frames';directory.mkdir(exist_ok=True)
     existing=read_json(job/'frames.json') if (job/'frames.json').exists() else []
+    if (job/'frames.json').exists() and sha(job/'frames.json')!=manifest.get('frames_sha256'):
+        raise ValueError('Frame metadata changed; review before extracting more frames')
     for row in proposed:
         seconds=row['seconds']
         if not math.isfinite(seconds) or not 0<=seconds<duration:
@@ -107,6 +111,7 @@ def frames(job,times=None,budget=24):
         existing.append(dict(row,id=frame_id,path=str(target.relative_to(job)),sha256=sha(target)))
     write_json(job/'frames.json',existing)
     manifest['frame_count']=len(existing)
+    manifest['frames_sha256']=sha(job/'frames.json')
     write_json(job/'manifest.json',manifest)
     return existing
 
@@ -144,6 +149,7 @@ def process(job,srt=None,whisper_model=None,whisper_bin=None,language='auto',bud
     manifest.update(status='material_ready',semantic_status='needs_review',processed_at=now(),
                     transcription_method=transcription,segment_count=len(segments),frame_count=len(frame_rows),
                     transcript_sha256=sha(job/'transcript.srt') if segments else None,
+                    segments_sha256=sha(job/'segments.json'),frames_sha256=sha(job/'frames.json'),
                     coverage=dict(video_duration=manifest['media']['duration'],
                                   last_transcript_end=segments[-1]['end'] if segments else None,
                                   visual='timestamp/cue candidates; not semantic frame recognition',

@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from videoknowledge.common import inside, read_json, write_json
 from videoknowledge.library import acquire, add_cards, export, get, query
-from videoknowledge.media import anchor_times, parse_srt, process
+from videoknowledge.media import anchor_times, frames, parse_srt, process
 from videoknowledge.providers import identify, public_metadata, yt_arguments
 
 
@@ -110,11 +110,44 @@ class PipelineTests(unittest.TestCase):
         with self.assertRaises(ValueError):add_cards(job,cards_file)
         self.assertFalse((job/'cards.json').exists())
         write_json(cards_file,dict(cards=[card]))
+        for name in ['segments','frames']:
+            metadata_path=job/(name+'.json');original=metadata_path.read_bytes()
+            metadata_path.write_text('[]')
+            with self.assertRaises(ValueError):add_cards(job,cards_file)
+            with self.assertRaises(ValueError):frames(job,[0.4])
+            self.assertFalse((job/'cards.json').exists())
+            metadata_path.write_bytes(original)
+        for evidence in [[],dict(segment_ids='1'),dict(segment_ids=[True])]:
+            write_json(cards_file,dict(cards=[dict(card,evidence=evidence)]))
+            with self.assertRaises(ValueError):add_cards(job,cards_file)
+        write_json(cards_file,dict(cards=[card]))
         cards=add_cards(job,cards_file)
         self.assertEqual(query(library,'验证想法','personal'),[])
         hits=query(library,'验证想法','project:test')
         self.assertEqual(hits[0]['id'],cards[0]['id'])
         self.assertIn('card',get(library,cards[0]['id']))
+        original_cards=(job/'cards.json').read_bytes()
+        for status in ['candidate','archived','superseded']:
+            inactive=dict(cards[0],status=status)
+            write_json(job/'cards.json',dict(cards=[inactive]))
+            self.assertNotIn('card',get(library,cards[0]['id']))
+        (job/'cards.json').write_bytes(original_cards)
+        metadata_path=job/'segments.json';original_segments=metadata_path.read_bytes()
+        metadata_path.write_text('[]')
+        self.assertTrue(get(library,cards[0]['id'])['source_changed'])
+        with self.assertRaises(ValueError):export(job,self.root/'stale-vault')
+        metadata_path.write_bytes(original_segments)
+        malformed=read_json(job/'cards.json')
+        malformed['cards'][0]['evidence']['frames'][0]['path']='../../outside.jpg'
+        write_json(job/'cards.json',malformed)
+        with self.assertRaises(ValueError):export(job,self.root/'unsafe-vault')
+        self.assertFalse((self.root/'outside.jpg').exists())
+        (job/'cards.json').write_bytes(original_cards)
+        original_manifest=(job/'manifest.json').read_bytes()
+        bad_manifest=read_json(job/'manifest.json');bad_manifest['id']='../outside'
+        write_json(job/'manifest.json',bad_manifest)
+        with self.assertRaises(ValueError):export(job,self.root/'unsafe-vault')
+        (job/'manifest.json').write_bytes(original_manifest)
         note=Path(export(job,self.root/'vault'))
         self.assertTrue(note.is_file());self.assertTrue((note.parent/'transcript.srt').is_file())
         with self.assertRaises(ValueError):export(job,self.root/'vault')
